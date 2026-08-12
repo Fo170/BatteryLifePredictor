@@ -1,0 +1,58 @@
+{
+  "name": "BatteryLifePredictor",
+  "version": "1.2.1",
+  "description": "Prédiction de vie résiduelle des batteries pour Arduino / ESP32 / ARM. Header-only. Intègre DOD exponentiel, Arrhenius, sulfatation plomb, EFC, Miner, Rainflow, régression linéaire, Kalman 1D et simulation rapide. Compatible BatteryModels & BatteryKalman.",
+  "keywords": [
+    "battery",
+    "life",
+    "prediction",
+    "SOC",
+    "SOH",
+    "DOD",
+    "EFC",
+    "Miner",
+    "Rainflow",
+    "Kalman",
+    "sulfatation",
+    "plomb",
+    "lithium",
+    "LiFePO4",
+    "IEC 61427",
+    "aging",
+    "degradation"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Fo170/BatteryLifePredictor"
+  },
+  "authors": [
+    {
+      "name": "FOURNET Olivier",
+      "email": "olivier.fournet@free.fr",
+      "maintainer": true
+    }
+  ],
+  "license": "GPL-3.0",
+  "homepage": "https://github.com/Fo170/BatteryLifePredictor",
+  "dependencies": {
+    "Fo170/BatteryModels": "*",
+    "Fo170/BatteryKalman": "*"
+  },
+  "frameworks": "arduino",
+  "platforms": [
+    "atmelavr",
+    "espressif32",
+    "ststm32",
+    "teensy",
+    "raspberrypi"
+  ],
+  "examples": [
+    {
+      "name": "Exemple complet v1.2.1",
+      "base": "Exemples",
+      "files": ["Exemple_BatteryLifePredictor_v12.ino"]
+    }
+  ],
+  "headers": ["BatteryLifePredictor.h"],
+  "examplesDir": "Exemples"
+}
