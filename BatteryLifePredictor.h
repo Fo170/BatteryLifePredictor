@@ -26,6 +26,9 @@
 #ifndef BATTERY_LIFE_PREDICTOR_H
 #define BATTERY_LIFE_PREDICTOR_H
 
+// Version de la librairie (source UNIQUE — agrégée par src/liste_lib.h)
+#define __BATTERYLIFEPREDICTOR_H_VERSION__ "1.3.0"
+
 #include <Arduino.h>
 
 // ============================================================
@@ -66,6 +69,31 @@
 
 #ifndef BLP_KALMAN1D_R_MEASURE
 #define BLP_KALMAN1D_R_MEASURE 0.5f   // Bruit de mesure capacité (%²)
+#endif
+
+// ============================================================
+// v1.3.0 — MODÈLE D'USURE (calendaire plancher + cycles réels)
+// ============================================================
+#ifndef BLP_CAPACITY_NEW_AH
+#define BLP_CAPACITY_NEW_AH 0.0f        // capacité d'une batterie NEUVE (Ah) ; 0 = nominal modèle
+#endif
+#ifndef BLP_INITIAL_WEAR_PCT
+#define BLP_INITIAL_WEAR_PCT 0.0f       // usure initiale (0-100 %), batteries de récupération
+#endif
+#ifndef BLP_CALENDAR_LIFE_DAYS
+#define BLP_CALENDAR_LIFE_DAYS 3650.0f  // vie calendaire plancher (jours) à 25 °C (défaut 10 ans)
+#endif
+#ifndef BLP_CAL_Q10
+#define BLP_CAL_Q10 2.0f                // accélération calendaire par +10 °C (loi Q10)
+#endif
+#ifndef BLP_EOL_CAPACITY_AH
+#define BLP_EOL_CAPACITY_AH 0.0f        // capacité de fin de vie (Ah) ; 0 = BLP_EOL_CAPACITY_PCT du neuf
+#endif
+#ifndef BLP_MICROCYCLE_MIN_DOD
+#define BLP_MICROCYCLE_MIN_DOD 0.5f     // amplitude mini d'un cycle (% de la capacité neuve)
+#endif
+#ifndef BLP_RAINFLOW_STACK
+#define BLP_RAINFLOW_STACK 12           // taille de la pile de turning-points (streaming rainflow)
 #endif
 
 // ============================================================
@@ -120,8 +148,19 @@ struct BatteryLifeState {
     uint32_t hours_in_psoc;
     uint32_t hours_since_eq;
     uint32_t timestamp_hours;
-    float    capacity_initial;
-    float    capacity_current;
+    float    capacity_initial;     // capacité au début (neuf × (1-usure_init))
+    float    capacity_current;     // capacité courante = neuf × (1-usure_totale)
+
+    // --- v1.3.0 : modèle d'usure (calendaire + cycles) ---
+    float    wear_init;            // usure initiale (0..1)
+    float    wear_cycle;           // usure cumulée par cycles (Miner)
+    float    ah_net;               // bilan Ah net intégré (signal pour Rainflow)
+    float    rf_dir;               // direction courante (+1 charge, -1 décharge, 0 = init)
+    float    rf_ext;               // extrême courant (Ah net)
+    float    rf_lastAmp;           // dernier cycle extrait (DOD %)
+    float    rf_val[BLP_RAINFLOW_STACK];  // pile de turning points (rainflow)
+    uint8_t  rf_n;                 // nombre de turning points dans la pile
+    uint8_t  rf_reserved[3];
 
     // --- Historique DOD ---
     uint8_t  dod_history_count;
@@ -153,7 +192,7 @@ struct BatteryLifeState {
 
 static const BatteryLifeParams BLP_PARAMS[] PROGMEM = {
     {4000.0f, 0.020f, 50.0f, 0.70f, 50.0f, false, 0.0f, 0.0f, 0.0f},   // 0 UNKNOWN
-    {5500.0f, 0.022f, 55.0f, 0.70f, 50.0f, true,  0.015f, 1.5f, 15.0f}, // 1 FLOODED
+    {3600.0f, 0.022f, 55.0f, 0.70f, 50.0f, true,  0.015f, 1.5f, 15.0f}, // 1 FLOODED (N(50%)=1200)
     {5000.0f, 0.023f, 55.0f, 0.70f, 50.0f, true,  0.018f, 1.5f, 15.0f}, // 2 AGM
     {5200.0f, 0.022f, 55.0f, 0.72f, 50.0f, true,  0.016f, 1.5f, 15.0f}, // 3 GEL
     {8000.0f, 0.012f, 50.0f, 0.93f, 80.0f, false, 0.0f, 0.0f, 0.0f},   // 4 LIFEPO4
@@ -182,12 +221,16 @@ static const float BLP_R = 8.314f;
 
 class BatteryLifePredictor {
 public:
-    BatteryLifePredictor() : _model(nullptr), _kalman(nullptr), _params(nullptr) {
+    BatteryLifePredictor() : _model(nullptr), _kalman(nullptr), _params(nullptr),
+                             _capacityNew(0.0f) {
         resetState();
     }
 
+    // v1.3.0 : capacityNew = capacité d'une batterie NEUVE (Ah) ;
+    // initialWearPct = usure initiale (0-100 %). La capacité au démarrage =
+    // capacityNew × (1 - usure). Si capacityNew = 0 → nominal du modèle.
     void begin(class BatteryModel* model, class BatteryKalman* kalman = nullptr,
-               float capacityInitial = 0.0f) {
+               float capacityNew = 0.0f, float initialWearPct = 0.0f) {
         if (!model) return;
         _model = model;
         _kalman = kalman;
@@ -197,14 +240,14 @@ public:
         } else {
             _params = &BLP_PARAMS[0];
         }
+        float capNew = (capacityNew > 0.0f) ? capacityNew : model->getNominalCapacity();
+        if (capNew <= 0.0f) capNew = 100.0f;
+        float wear0 = constrain(initialWearPct, 0.0f, 99.0f) / 100.0f;
         resetState();
-        if (capacityInitial > 0.0f) {
-            _state.capacity_initial = capacityInitial;
-            _state.capacity_current = capacityInitial;
-        } else {
-            _state.capacity_initial = model->getNominalCapacity();
-            _state.capacity_current = model->getNominalCapacity();
-        }
+        _capacityNew = capNew;
+        _state.wear_init = wear0;
+        _state.capacity_initial = capNew * (1.0f - wear0);
+        _state.capacity_current = _state.capacity_initial;
     }
 
     void reset() {
@@ -233,57 +276,97 @@ public:
 
         pushSocHistory(soc, (float)_state.timestamp_hours / 3600.0f);
 
-        float dod = 0.0f;
-        if (_state.last_soc >= 0.0f) {
-            float delta_soc = _state.last_soc - soc;
-            if (delta_soc > 0.5f) {
-                dod = delta_soc;
-                _state.total_microcycles++;
+        // --- v1.3.0 : détection de cycles par Rainflow sur le bilan Ah net ---
+        _state.ah_net += current * dt_hours;   // signé : + charge, - décharge
+        rainflowFeed(_state.ah_net, temperature, soc, dt_hours);
 
-                uint8_t idx = _state.dod_history_count % BLP_MAX_DOD_HISTORY;
-                _state.dod_history[idx] = dod;
-                _state.dod_history_time[idx] = (float)_state.timestamp_hours / 3600.0f;
-                _state.dod_history_count++;
-
-                _state.efc_total += (dod / 100.0f);
-
-                float excess = max(0.0f, dod - BLP_DOD_EXCESS_THRESHOLD);
-                _state.dod_excess_acc += excess;
-
-                updateMiner(dod, temperature);
-
-                if (_params && pgm_read_byte(&_params->has_sulfatation)) {
-                    updateSulfatation(soc, dt_hours);
-                }
-
-                if (dod >= 80.0f) {
-                    _state.total_cycles++;
-                }
-            }
-        }
+        // --- capacité courante = capacité neuve × (1 − usure totale) ---
+        _state.capacity_current = (_capacityNew > 0.0f)
+            ? _capacityNew * (1.0f - wearTotal())
+            : _state.capacity_initial;
+        if (_state.capacity_current < 0.0f) _state.capacity_current = 0.0f;
         _state.last_soc = soc;
-        _state.last_dod = dod;
-
-        if (_kalman) {
-            float aging = _model->getCapacityFactorAging();
-            _state.capacity_current = _state.capacity_initial * aging;
-        } else {
-            _state.capacity_current = _state.capacity_initial * 
-                (1.0f - 0.2f * (_state.efc_total / getNominalCyclesAtDOD(50.0f, temperature)));
-            _state.capacity_current = max(_state.capacity_current, _state.capacity_initial * 0.5f);
-        }
 
         float nowHours = (float)_state.timestamp_hours / 3600.0f;
         if (nowHours - _lastRegHours >= 24.0f) {
             _lastRegHours = nowHours;
-            float capPct = (_state.capacity_current / _state.capacity_initial) * 100.0f;
+            float capPct = (_capacityNew > 0.0f)
+                ? (_state.capacity_current / _capacityNew) * 100.0f : 100.0f;
             pushRegressionPoint(_lastRegHours / 24.0f, capPct);
             updateKalman1D(_lastRegHours / 24.0f, capPct);
         }
+    }
 
-        if (_state.total_microcycles % 6 == 0 && _state.total_microcycles > 0) {
-            runRainflow();
+    // --- v1.3.0 : Rainflow streaming sur le bilan Ah net ---
+    void rainflowFeed(float v, float temperature, float soc, float dt_hours) {
+        // Sulfatation : comptée en continu (heures passées sous 80 % de SoC)
+        if (_params && pgm_read_byte(&_params->has_sulfatation)) {
+            updateSulfatation(soc, dt_hours);
         }
+
+        float min_amp = BLP_MICROCYCLE_MIN_DOD / 100.0f
+                      * ((_capacityNew > 0.0f) ? _capacityNew : 100.0f);
+        if (min_amp <= 0.0f) min_amp = 0.01f;
+
+        if (_state.rf_dir == 0.0f) { _state.rf_dir = 1.0f; _state.rf_ext = v; return; }
+
+        if (_state.rf_dir > 0.0f) {
+            if (v > _state.rf_ext) _state.rf_ext = v;
+            else if (_state.rf_ext - v >= min_amp) {
+                rainflowPush(_state.rf_ext, temperature);
+                _state.rf_dir = -1.0f;
+                _state.rf_ext = v;
+            }
+        } else {
+            if (v < _state.rf_ext) _state.rf_ext = v;
+            else if (v - _state.rf_ext >= min_amp) {
+                rainflowPush(_state.rf_ext, temperature);
+                _state.rf_dir = 1.0f;
+                _state.rf_ext = v;
+            }
+        }
+    }
+
+    // Empile un turning point et extrait les cycles complets (rainflow 3-points)
+    void rainflowPush(float tp, float temperature) {
+        if (_state.rf_n < BLP_RAINFLOW_STACK) {
+            _state.rf_val[_state.rf_n++] = tp;
+        } else {
+            for (uint8_t i = 0; i < BLP_RAINFLOW_STACK - 1; i++)
+                _state.rf_val[i] = _state.rf_val[i + 1];
+            _state.rf_val[BLP_RAINFLOW_STACK - 1] = tp;
+        }
+        bool extracted = true;
+        while (_state.rf_n >= 3 && extracted) {
+            extracted = false;
+            float A = _state.rf_val[_state.rf_n - 3];
+            float B = _state.rf_val[_state.rf_n - 2];
+            float C = _state.rf_val[_state.rf_n - 1];
+            if (fabsf(B - A) <= fabsf(C - B)) {
+                addCycleDamage(fabsf(B - A), temperature);
+                _state.rf_val[_state.rf_n - 3] = _state.rf_val[_state.rf_n - 1];
+                _state.rf_n -= 2;
+                extracted = true;
+            }
+        }
+    }
+
+    // Ajoute le dommage d'un cycle (Miner) : DOD % de la capacité neuve.
+    void addCycleDamage(float amp_ah, float temperature) {
+        if (_capacityNew <= 0.0f || amp_ah <= 0.0f) return;
+        float dod = (amp_ah / _capacityNew) * 100.0f;
+        if (dod < 1e-3f) return;
+        float N = getNominalCyclesAtDOD(dod, temperature);
+        if (N > 0.0f) _state.wear_cycle += 1.0f / N;
+        _state.miner_damage = _state.wear_cycle;   // alias d'affichage
+        _state.efc_total += dod / 100.0f;
+        _state.total_microcycles++;
+        _state.rf_lastAmp = dod;
+        if (dod >= 80.0f) _state.total_cycles++;
+        uint8_t idx = _state.dod_history_count % BLP_MAX_DOD_HISTORY;
+        _state.dod_history[idx] = dod;
+        _state.dod_history_time[idx] = (float)_state.timestamp_hours / 3600.0f;
+        _state.dod_history_count++;
     }
 
     // ============================================================
@@ -423,30 +506,67 @@ public:
     // GETTERS — PRÉDICTION DE VIE
     // ============================================================
 
-    float getRemainingLifeYears(float dodAssumed = 0.0f) const {
-        if (!_params) return 0.0f;
-        float dod = (dodAssumed > 0.0f) ? dodAssumed : getAverageDOD();
-        if (dod < 1.0f) dod = 10.0f;
-        float cycles_left = getRemainingCycles(dod, _temp);
-        return cycles_left / 365.0f;
+    // ============================================================
+    // v1.3.0 : USURE (calendaire plancher + cycles réels)
+    // ============================================================
+    float wearCalendar() const {
+        float days = (float)_state.timestamp_hours / 86400.0f;
+        float life = (BLP_CALENDAR_LIFE_DAYS > 0.0f) ? BLP_CALENDAR_LIFE_DAYS : 3650.0f;
+        float q10  = (BLP_CAL_Q10 > 1.0f) ? BLP_CAL_Q10 : 2.0f;
+        float temp_f = powf(q10, (_temp - 25.0f) / 10.0f);
+        return (days / life) * temp_f;
+    }
+    float wearCycle() const { return _state.wear_cycle; }
+    float wearTotal() const {
+        float d = _state.wear_init + wearCalendar() + _state.wear_cycle;
+        return constrain(d, 0.0f, 1.0f);
+    }
+    float getWear() const { return wearTotal(); }
+    float getCalendarWear() const { return wearCalendar(); }
+    float getCycleWear() const { return _state.wear_cycle; }
+    float getCapacityNew() const { return _capacityNew; }
+    float getCapacityEol() const {
+        if (BLP_EOL_CAPACITY_AH > 0.0f) return BLP_EOL_CAPACITY_AH;
+        return (_capacityNew > 0.0f) ? _capacityNew * (BLP_EOL_CAPACITY_PCT / 100.0f) : 0.0f;
+    }
+    // Seuil EOL en % de la capacité NEUVE (pour la régression/Kalman 1D).
+    float eolPct() const {
+        if (_capacityNew > 0.0f && BLP_EOL_CAPACITY_AH > 0.0f)
+            return (BLP_EOL_CAPACITY_AH / _capacityNew) * 100.0f;
+        return BLP_EOL_CAPACITY_PCT;
     }
 
+    // Vie résiduelle (années) = temps pour atteindre la capacité de fin de vie,
+    // au taux d'usure courant (calendaire + cycles récents).
+    float getRemainingLifeYears(float dodAssumed = 0.0f) const {
+        (void)dodAssumed;
+        float D = wearTotal();
+        float capEol = getCapacityEol();
+        float dEol = 1.0f;
+        if (_capacityNew > 0.0f && capEol > 0.0f) dEol = 1.0f - capEol / _capacityNew;
+        if (dEol <= D) return 0.0f;
+
+        float days = (float)_state.timestamp_hours / 86400.0f;
+        if (days < 1.0f) days = 1.0f;
+        float rateCal = 1.0f / ((BLP_CALENDAR_LIFE_DAYS > 0.0f) ? BLP_CALENDAR_LIFE_DAYS : 3650.0f);
+        float rateCyc = _state.wear_cycle / days;
+        float rate = rateCal + rateCyc;
+        if (rate <= 0.0f) return -1.0f;
+        return ((dEol - D) / rate) / 365.0f;
+    }
+
+    // Conservé (info) : cycles restants à un DOD donné d'après la capacité neuve.
     float getRemainingCycles(float dod, float temperature) const {
         if (!_params) return 0.0f;
         float N_total = getNominalCyclesAtDOD(dod, temperature);
         float N_consumed = _state.efc_total * (100.0f / dod);
-        if (pgm_read_byte(&_params->has_sulfatation)) {
-            float sulf_factor = 1.0f + _state.sulfatation_level * 0.5f;
-            N_consumed *= sulf_factor;
-        }
-        float remaining = N_total - N_consumed;
-        return max(remaining, 0.0f);
+        return max(N_total - N_consumed, 0.0f);
     }
 
+    // SOH relatif à la capacité NEUVE (démarre à 100−usure_initiale)
     float getRemainingCapacityPercent() const {
-        if (_state.capacity_initial <= 0.0f) return 100.0f;
-        float pct = (_state.capacity_current / _state.capacity_initial) * 100.0f;
-        return constrain(pct, 0.0f, 100.0f);
+        if (_capacityNew <= 0.0f) return 100.0f;
+        return constrain((_state.capacity_current / _capacityNew) * 100.0f, 0.0f, 100.0f);
     }
 
     float getSOH() const { return getRemainingCapacityPercent(); }
@@ -480,7 +600,7 @@ public:
     const BatteryLifeState& getState() const { return _state; }
 
     void setState(const BatteryLifeState& state) {
-        if (state.magic == 0x424C5032 && state.version == 3) {
+        if (state.magic == 0x424C5032 && state.version == 4) {
             _state = state;
         }
     }
@@ -613,7 +733,7 @@ public:
         float a, b, r2;
         if (!computeRegression(a, b, r2)) return -1.0f;
         if (a >= 0.0f) return -1.0f;
-        float days = (BLP_EOL_CAPACITY_PCT - b) / a;
+        float days = (eolPct() - b) / a;
         return max(days, 0.0f);
     }
 
@@ -683,7 +803,7 @@ public:
         if (_state.reg_count > 0) {
             currentDay = _state.reg_time_days[_state.reg_count - 1];
         }
-        float days = (BLP_EOL_CAPACITY_PCT - (a * currentDay + b)) / a;
+        float days = (eolPct() - (a * currentDay + b)) / a;
         return max(days, 0.0f);
     }
 
@@ -722,6 +842,7 @@ private:
     const BatteryLifeParams* _params;
     BatteryLifeState _state;
     float _temp;
+    float _capacityNew;    // capacité neuve de référence (v1.3.0)
     uint8_t _tech;
 
     // Accumulateurs fractionnaires (hors BatteryLifeState : non persistés)
@@ -734,8 +855,9 @@ private:
     void resetState() {
         memset(&_state, 0, sizeof(BatteryLifeState));
         _state.magic = 0x424C5032;
-        _state.version = 3;
+        _state.version = 4;
         _state.last_soc = -1.0f;
+        _state.rf_dir = 0.0f;
         _temp = 25.0f;
         _secondsCarry = 0.0f;
         _fracEqHours = 0.0f;
