@@ -1,5 +1,18 @@
 # Changelog - BatteryLifePredictor
 
+## [1.3.1] - 2026-10-17
+
+### ✨ Added — macro de version `__<LIB>_H_VERSION__`
+
+Chaque header déclare désormais sa version via une macro préprocesseur,
+source **unique** (un projet hôte peut l'agréger, ex. page `/version`).
+
+### 🏷️ Divers
+
+- Version `1.3.0` → `1.3.1` (`library.json` + `library.properties`)
+
+---
+
 ## [1.3.0] - 2026-10-17
 
 ### ✨ Added — modèle d'usure décomposé + cycles réels (Rainflow)

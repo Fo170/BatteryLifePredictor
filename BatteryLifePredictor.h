@@ -27,7 +27,7 @@
 #define BATTERY_LIFE_PREDICTOR_H
 
 // Version de la librairie (source UNIQUE — agrégée par src/liste_lib.h)
-#define __BATTERYLIFEPREDICTOR_H_VERSION__ "1.3.0"
+#define __BATTERYLIFEPREDICTOR_H_VERSION__ "1.3.1"
 
 #include <Arduino.h>
 
