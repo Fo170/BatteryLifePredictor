@@ -1,7 +1,7 @@
 {
   "name": "BatteryLifePredictor",
   "version": "1.5.0",
-  "description": "Prédiction de vie résiduelle des batteries pour Arduino / ESP32 / ESP8266 / ARM. Header-only, SANS dépendance. Intègre DOD exponentiel, Arrhenius, sulfatation plomb, EFC, Miner, Rainflow, régression linéaire, Kalman 1D et simulation rapide. v1.5.0 : setWearInit() (recalage de l'usure initiale sur une capacité MESURÉE, sans double comptage du calendaire et des cycles) + getKalmanEOLReason() (distinguer « non calculable » de « dépassé »).",
+  "description": "Prédiction de vie résiduelle des batteries pour Arduino / ESP32 / ESP8266 / ARM. Header-only. Inclut explicitement BatteryModels et BatteryKalman (déclarés dans le README : aucune librairie Fo170 n'est au registre PlatformIO). Intègre DOD exponentiel, Arrhenius, sulfatation plomb, EFC, Miner, Rainflow, régression linéaire, Kalman 1D et simulation rapide. v1.5.0 : setWearInit() (recalage de l'usure initiale sur une capacité MESURÉE, sans double comptage du calendaire et des cycles) + getKalmanEOLReason() (distinguer « non calculable » de « dépassé »).",
   "keywords": [
     "battery",
     "life",
