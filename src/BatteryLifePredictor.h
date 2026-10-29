@@ -1,15 +1,15 @@
 /**
  * @file BatteryLifePredictor.h
- * @brief Prédiction de vie résiduelle des batteries — v1.2.1
+ * @brief Prédiction de vie résiduelle des batteries — v1.5.0
  * @author FOURNET Olivier (olivier.fournet@free.fr)
  * @license GPL-3.0
- * @version 1.2.1
- * @date 2026-08-12
- * 
+ * @version 1.5.0
+ * @date 2026-10-24
+ *
  * Ajouts v1.2.0 :
  *  - Kalman 1D sur la dérive de capacité (lissage régression, prédiction EOL robuste)
  *  - Mode simulation rapide (profils de cycles prédéfinis, validation sans matériel)
- * 
+ *
  * Corrections v1.2.1 :
  *  - Horloge interne fiable : accumulation fractionnaire des secondes dans
  *    `timestamp_hours` (avant, les appels `update()` à dt < 0,5 s perdaient
@@ -18,18 +18,49 @@
  *  - Cadences de régression/Kalman par instance (`_lastRegHours`, `_lastSimReg`
  *    ne sont plus des `static` partagés entre toutes les instances).
  *  - `_temp` initialisé à 25 °C ; garde d'`update()`/`begin()` sans modèle.
- * 
- * Intégration : BatteryModels (Fo170) + BatteryKalman (Fo170)
- * Compatible : Arduino AVR, ESP32, ARM
+ *
+ * Ajouts v1.4.0 :
+ *  - `setCapacityNew(float ah)` : recalage de la capacité de référence APRÈS
+ *    apprentissage (elle était figée au `begin()`).
+ *  - `setWearCycle(float w)` : correction d'usure par une mesure.
+ *  - `getCapacityCurrent()` exposé publiquement.
+ *  - Garde : `setCapacityNew()` borné [1 ; 100 000] Ah, refusé si non fini.
+ *
+ * Ajouts v1.5.0 :
+ *  - `setWearInit()` : recalage de l'usure initiale sur une capacité MESURÉE,
+ *    sans double comptage du calendaire ni des cycles.
+ *  - `getKalmanEOLReason()` / `kalmanEOLReasonStr()` : distinguer « non
+ *    calculable » de « dépassé » (un `-1` s'affichait « -1 jours »).
+ *  - Correction : jusqu'à 96,5 % du SOH affiché provenait de la constante
+ *    `BLP_INITIAL_WEAR_PCT` au lieu d'une mesure.
+ *
+ * Dépendances : BatteryModels et BatteryKalman (Fo170). Depuis la v1.5.0 le
+ * header les INCLUT explicitement (il se contentait de les déclarer, ce qui
+ * obligeait l'appelant à respecter un ordre d'inclusion non documenté).
+ *
+ * Compatible : Arduino AVR, ESP32, ESP8266, ARM
  */
 
 #ifndef BATTERY_LIFE_PREDICTOR_H
 #define BATTERY_LIFE_PREDICTOR_H
 
 // Version de la librairie (source UNIQUE — agrégée par src/liste_lib.h)
-#define __BATTERYLIFEPREDICTOR_H_VERSION__ "1.3.1"
+#define __BATTERYLIFEPREDICTOR_H_VERSION__ "1.5.0"
 
 #include <Arduino.h>
+
+// ────────────────────────────────────────────────────────────────
+// DÉPENDANCES (v1.5.0)
+// ⚠️ Le header se contentait de DÉCLARER `class BatteryModel;` et
+//    `class BatteryKalman;` devant `begin()`, en comptant sur l'appelant pour
+//    les inclure AVANT. Un `#include <BatteryLifePredictor.h>` seul échouait
+//    donc (« invalid use of incomplete type 'class BatteryModel' ») : l'ordre
+//    d'inclusion de main.cpp masquait le défaut. Les includes sont désormais
+//    explicites — le header est auto-suffisant, et `library.json` déclare les
+//    deux dépendances pour que le LDF les installe.
+// ────────────────────────────────────────────────────────────────
+#include "BatteryModels.h"
+#include "BatteryKalman.h"
 
 // ============================================================
 // CONFIGURATION COMPILE-TIME
@@ -525,6 +556,100 @@ public:
     float getCalendarWear() const { return wearCalendar(); }
     float getCycleWear() const { return _state.wear_cycle; }
     float getCapacityNew() const { return _capacityNew; }
+
+    // ════════════════════════════════════════════════════════════════
+    // v1.4.0 (FORK LOCAL) — capacité courante et recalage
+    // ════════════════════════════════════════════════════════════════
+    // POURQUOI CES AJOUTS
+    // -------------------
+    // `_capacityNew` était figé au `begin()` et AUCUN setter n'existait :
+    //     _capacityNew = capNew;      // BatteryLifePredictor.h:247, une seule fois
+    // Conséquence : si l'apprentissage de capacité (BatteryKalman::C_hat)
+    // découvre une valeur différente, le prédicteur de vie ne peut pas en
+    // tenir compte. Le SOH reste piloté uniquement par Miner + calendaire.
+    //
+    // Sur l'installation : capacity_new = 72 Ah, usure initiale 50 %
+    //   ⇒ capacity_current = 36,0 Ah
+    // alors que C_hat = 26,07 Ah et que le cycle du 19/10 implique ≈ 37,5 Ah.
+    // Les trois valeurs ne se parlent pas — c'est ce que le lot U rend
+    // visible et que le lot Y arbitrera.
+
+    /**
+     * @brief Capacité courante déduite de l'usure.
+     *
+     * C'était une observable ORPHELINE : `_state.capacity_current` était
+     * calculé à chaque `update()` mais aucun accesseur ne l'exposait.
+     *
+     * @return Capacité courante (Ah) = capacity_new × (1 − usure totale)
+     */
+    float getCapacityCurrent() const { return _state.capacity_current; }
+
+    /**
+     * @brief Recale la capacité d'une batterie NEUVE.
+     *
+     * À utiliser quand l'apprentissage de capacité (`C_hat`) a convergé vers
+     * une valeur stable et que l'on veut que le modèle d'usure reparte de
+     * cette référence. Ne modifie PAS l'usure déjà accumulée : seul le
+     * dénominateur change, donc le SOH est recalculé.
+     *
+     * ⚠️ Ne PAS appeler à chaque échantillon : c'est une opération de
+     *    recalage, pas une régulation. Une valeur qui varie ferait osciller
+     *    le SOH et la prédiction de vie.
+     *
+     * @param ah Capacité neuve estimée (Ah). Bornée [1 ; 100 000].
+     * @return true si la valeur a été acceptée
+     */
+    bool setCapacityNew(float ah) {
+        if (!isfinite(ah) || ah < 1.0f || ah > 100000.0f) return false;
+        _capacityNew = ah;
+        // Recalcul cohérent de la capacité courante avec l'usure déjà connue.
+        _state.capacity_current = ah * (1.0f - wearTotal());
+        if (_state.capacity_current < 0.0f) _state.capacity_current = 0.0f;
+        return true;
+    }
+
+    /**
+     * @brief Corrige directement l'usure INITIALE (recalage par mesure).
+     *
+     * `wearTotal() = wear_init + wear_calendaire + wear_cycles`. Une capacité
+     * mesurée donne l'usure TOTALE (`1 − C_mesurée / C_neuve`) ; pour que le
+     * modèle la restitue, il faut donc poser
+     *     wear_init = wear_mesurée − wear_calendaire − wear_cycles
+     * et non `wear_mesurée` (qui compterait deux fois calendaire et cycles).
+     *
+     * ⚠️ C'est un RECALAGE, pas une régulation : appeler à chaque échantillon
+     *    ferait osciller le SOH. L'appelant doit lisser (cf. main.cpp).
+     *
+     * @param w Usure initiale (0…1)
+     */
+    bool setWearInit(float w) {
+        if (!isfinite(w) || w < 0.0f || w > 1.0f) return false;
+        _state.wear_init = w;
+        _state.capacity_current = (_capacityNew > 0.0f)
+            ? _capacityNew * (1.0f - wearTotal()) : _state.capacity_initial;
+        if (_state.capacity_current < 0.0f) _state.capacity_current = 0.0f;
+        return true;
+    }
+    float getWearInit() const { return _state.wear_init; }
+
+    /**
+     * @brief Corrige directement l'usure par cycles (recalage par mesure).
+     *
+     * Utile si une décharge contrôlée établit une capacité réelle : on peut
+     * alors aligner `wear_cycle` sur l'écart constaté au lieu d'attendre que
+     * la règle de Miner le découvre.
+     *
+     * @param w Usure par cycles (0…1)
+     */
+    bool setWearCycle(float w) {
+        if (!isfinite(w) || w < 0.0f || w > 1.0f) return false;
+        _state.wear_cycle = w;
+        _state.capacity_current = (_capacityNew > 0.0f)
+            ? _capacityNew * (1.0f - wearTotal()) : _state.capacity_initial;
+        if (_state.capacity_current < 0.0f) _state.capacity_current = 0.0f;
+        return true;
+    }
+
     float getCapacityEol() const {
         if (BLP_EOL_CAPACITY_AH > 0.0f) return BLP_EOL_CAPACITY_AH;
         return (_capacityNew > 0.0f) ? _capacityNew * (BLP_EOL_CAPACITY_PCT / 100.0f) : 0.0f;
@@ -805,6 +930,38 @@ public:
         }
         float days = (eolPct() - (a * currentDay + b)) / a;
         return max(days, 0.0f);
+    }
+
+    /**
+     * @brief POURQUOI `getKalmanDaysToEOL()` vaut -1 (v1.5.0, F-05).
+     *
+     * `-1` est une SENTINELLE D'ÉCHEC, pas une durée. Affichée telle quelle par
+     * un outil (« EOL_dans = -1 jours »), elle se lit à tort comme « fin de vie
+     * dépassée » alors qu'elle signifie « pas calculable ». Ce getter donne le
+     * motif, pour que l'appelant puisse écrire « n/a (pente non négative) ».
+     *
+     * @return 0 = calculable, 1 = Kalman 1D non initialisé,
+     *         2 = pente non négative (la capacité ne décroît pas),
+     *         3 = résultat non fini
+     */
+    uint8_t getKalmanEOLReason() const {
+        if (!_state.kalman1d.initialized) return 1;
+        float a = _state.kalman1d.a;
+        if (a >= -1e-6f) return 2;
+        float days = getKalmanDaysToEOL();
+        if (!isfinite(days)) return 3;
+        return 0;
+    }
+
+    /** @brief Libellé court du motif (PROGMEM-friendly : pointeur statique). */
+    static const char* kalmanEOLReasonStr(uint8_t r) {
+        switch (r) {
+            case 0:  return "ok";
+            case 1:  return "regression non initialisee";
+            case 2:  return "pente non negative";
+            case 3:  return "resultat non fini";
+            default: return "inconnu";
+        }
     }
 
     /**

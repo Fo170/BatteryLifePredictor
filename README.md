@@ -98,20 +98,19 @@
 ### Méthode 1 — Arduino IDE (manuelle)
 
 1. Téléchargez `BatteryLifePredictor.h`
-2. Placez-le dans le dossier `libraries/BatteryLifePredictor/` de votre sketchbook
-3. Redémarrez l'IDE Arduino
+2. Placez-le dans `libraries/BatteryLifePredictor/src/` de votre sketchbook
+3. Installez **aussi** les librairies compagnes (voir « Dépendances »)
+4. Redémarrez l'IDE Arduino
 
 ### Méthode 2 — PlatformIO
 
-Ajoutez dans `platformio.ini` :
-
 ```ini
 lib_deps =
-    https://github.com/Fo170/BatteryModels.git
-    https://github.com/Fo170/BatteryKalman.git
+    https://github.com/Fo170/BatteryModels.git#v2.3.0
+    https://github.com/Fo170/CoulombsAh.git#v3.1.0
+    https://github.com/Fo170/BatteryKalman.git#v2.4.0
+    https://github.com/Fo170/BatteryLifePredictor.git#v1.5.0
 ```
-
-Puis copiez `BatteryLifePredictor.h` dans `lib/BatteryLifePredictor/`.
 
 ### Dépendances
 
@@ -119,7 +118,19 @@ Puis copiez `BatteryLifePredictor.h` dans `lib/BatteryLifePredictor/`.
 |-----------|-------------|------|
 | `BatteryModels.h` | **Oui** | Modèle physique, OCV, détection état de charge |
 | `BatteryKalman.h` | **Oui à la compilation** (optionnel à l'exécution) | EKF 2D, estimation capacité. `update()` appelle ses méthodes : le header ne compile pas sans lui, même avec `nullptr` |
-| `Coulomb.h` | Oui (via `BatteryKalman.h`) | Compteur coulombs |
+| `CoulombsAh.h` | Oui (via `BatteryKalman.h`) | Compteur coulombs / Ah |
+
+⚠️ **Aucune de ces librairies n'est au registre PlatformIO**, donc PlatformIO
+**ne peut pas les résoudre automatiquement** : `library.json` déclare
+`"dependencies": {}` et il faut les lister explicitement dans `lib_deps` (comme
+ci-dessus). Une déclaration `"Fo170/BatteryModels": "*"` échoue avec
+`UnknownPackageError`.
+
+⚠️ **Depuis la v1.5.0, le header inclut explicitement `BatteryModels.h` et
+`BatteryKalman.h`.** Jusqu'à la v1.3.1 il se contentait de les *déclarer*
+(`class BatteryModel;`), ce qui obligeait l'appelant à les inclure **avant**
+`BatteryLifePredictor.h` — un ordre non documenté dont l'absence produisait
+`invalid use of incomplete type 'class BatteryModel'`.
 
 ---
 

@@ -1,7 +1,7 @@
 {
   "name": "BatteryLifePredictor",
-  "version": "1.3.1",
-  "description": "Prédiction de vie résiduelle des batteries pour Arduino / ESP32 / ARM. Header-only. Intègre DOD exponentiel, Arrhenius, sulfatation plomb, EFC, Miner, Rainflow, régression linéaire, Kalman 1D et simulation rapide. Compatible BatteryModels & BatteryKalman.",
+  "version": "1.5.0",
+  "description": "Prédiction de vie résiduelle des batteries pour Arduino / ESP32 / ESP8266 / ARM. Header-only, SANS dépendance. Intègre DOD exponentiel, Arrhenius, sulfatation plomb, EFC, Miner, Rainflow, régression linéaire, Kalman 1D et simulation rapide. v1.5.0 : setWearInit() (recalage de l'usure initiale sur une capacité MESURÉE, sans double comptage du calendaire et des cycles) + getKalmanEOLReason() (distinguer « non calculable » de « dépassé »).",
   "keywords": [
     "battery",
     "life",
@@ -34,14 +34,12 @@
   ],
   "license": "GPL-3.0",
   "homepage": "https://github.com/Fo170/BatteryLifePredictor",
-  "dependencies": {
-    "Fo170/BatteryModels": "*",
-    "Fo170/BatteryKalman": "*"
-  },
+  "dependencies": {},
   "frameworks": "arduino",
   "platforms": [
     "atmelavr",
     "espressif32",
+    "espressif8266",
     "ststm32",
     "teensy",
     "raspberrypi"
@@ -50,9 +48,13 @@
     {
       "name": "Exemple complet v1.2.1",
       "base": "Exemples",
-      "files": ["Exemple_BatteryLifePredictor_v12.ino"]
+      "files": [
+        "Exemple_BatteryLifePredictor_v12.ino"
+      ]
     }
   ],
-  "headers": ["BatteryLifePredictor.h"],
+  "headers": [
+    "BatteryLifePredictor.h"
+  ],
   "examplesDir": "Exemples"
 }
